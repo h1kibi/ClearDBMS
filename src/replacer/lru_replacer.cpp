@@ -28,6 +28,18 @@ bool LRUReplacer::victim(frame_id_t* frame_id) {
     //  利用lru_replacer中的LRUlist_,LRUHash_实现LRU策略
     //  选择合适的frame指定为淘汰页面,赋值给*frame_id
 
+    //参数合法检查
+    if(frame_id==nullptr){ return false; }
+
+    if(LRUlist_.empty()){ return false; } // LRUlist_为空则淘汰帧选取失败
+
+    frame_id_t victim_frame = LRUlist_.back();
+
+    LRUlist_.pop_back();
+    LRUhash_.erase(victim_frame);
+    
+    *frame_id = victim_frame;
+
     return true;
 }
 
@@ -40,6 +52,17 @@ void LRUReplacer::pin(frame_id_t frame_id) {
     // Todo:
     // 固定指定id的frame
     // 在数据结构中移除该frame
+
+    //参数合法检查
+    if(frame_id<0){ return; }
+
+    auto it = LRUhash_.find(frame_id);
+
+    if(it==LRUhash_.end()){ return; } //frame_id 若不在 LRUlist_ 中，则不操作
+    
+    //将帧移出LRUlist_，删除LRUhash_对应键值
+    LRUlist_.erase(it->second);
+    LRUhash_.erase(it);
 }
 
 /**
@@ -50,6 +73,18 @@ void LRUReplacer::unpin(frame_id_t frame_id) {
     // Todo:
     //  支持并发锁
     //  选择一个frame取消固定
+
+    std::scoped_lock lock{latch_};
+
+    //参数合法检查
+    if(frame_id<0){ return; }
+
+    if(LRUhash_.find(frame_id)!=LRUhash_.end()){ return; } //若 frame_id 在 LRUhash 中，不重复插入。
+
+    if (LRUlist_.size() >= max_size_) { return; } // LRUlist_ 满了
+
+    LRUlist_.push_front(frame_id);
+    LRUhash_.emplace(frame_id,LRUlist_.begin());
 }
 
 /**

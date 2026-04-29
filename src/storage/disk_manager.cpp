@@ -35,25 +35,17 @@ void DiskManager::write_page(int fd, page_id_t page_no, const char *offset, int 
 
     //参数合法检查
     if(offset==nullptr){ throw InternalError("DiskManager::write_page Error: invalid offset"); }
-    if(num_bytes<0){ throw InternalError("DiskManager::write_page Error: invalid num_bytes"); }
-
-    //文件上排他锁
-    if (flock(fd, LOCK_EX) == -1) {
-        throw InternalError("DiskManager::write_page Error: flock failed");
-    }
+    if(num_bytes<0||num_bytes>PAGE_SIZE){ throw InternalError("DiskManager::write_page Error: invalid num_bytes"); }
+    if (fd < 0) { throw InternalError("DiskManager::write_page Error: invalid fd"); }
+    if (page_no < 0) { throw InternalError("DiskManager::write_page Error: invalid page_no"); }
 
     off_t fileoffset = static_cast<off_t>(page_no)*PAGE_SIZE; //文件偏移量
 
     ssize_t write_bytes = pwrite(fd,offset,static_cast<size_t>(num_bytes),fileoffset); //写入数据,采用 pread 防多线程 fd 之间影响
 
     if(write_bytes!=num_bytes){ 
-        flock(fd,LOCK_UN);
-        throw InternalError("DiskManager::write_page Error: Partial writing"); 
+        throw InternalError("DiskManager::write_page Error"); 
     }//写入不全报错
-
-    if(flock(fd, LOCK_UN) == -1){
-        throw InternalError("DiskManager::read_page Error: unlock failed"); //解锁报错
-    }
 }
 
 /**
@@ -71,12 +63,9 @@ void DiskManager::read_page(int fd, page_id_t page_no, char *offset, int num_byt
 
     //参数合法检查
     if(offset==nullptr){ throw InternalError("DiskManager::read_page Error: invalid offset"); }
-    if(num_bytes<0){ throw InternalError("DiskManager::read_page Error: invalid num_bytes"); }
-
-    //文件上共享锁
-    if (flock(fd, LOCK_SH) == -1) {
-        throw InternalError("DiskManager::read_page Error: flock failed");
-    }
+    if(num_bytes<0||num_bytes>PAGE_SIZE){ throw InternalError("DiskManager::read_page Error: invalid num_bytes"); }
+    if (fd < 0) { throw InternalError("DiskManager::read_page Error: invalid fd"); }
+    if (page_no < 0) { throw InternalError("DiskManager::read_page Error: invalid page_no"); }
 
     off_t fileoffset = static_cast<off_t>(page_no)*PAGE_SIZE; //文件偏移量
 
@@ -88,12 +77,7 @@ void DiskManager::read_page(int fd, page_id_t page_no, char *offset, int num_byt
     ); //读取数据,采用 pread 防多线程 fd 之间影响
 
     if(read_bytes!=num_bytes){ 
-        flock(fd, LOCK_UN);
-        throw InternalError("DiskManager::read_page Error: Incomplete reading"); //读取不全报错
-    }
-
-    if(flock(fd, LOCK_UN) == -1){
-        throw InternalError("DiskManager::read_page Error: unlock failed"); //解锁报错
+        throw InternalError("DiskManager::read_page Error"); //读取不全报错
     }
 }
 
@@ -157,14 +141,17 @@ void DiskManager::create_file(const std::string &path) {
 
     std::lock_guard<std::mutex> lock(Mutex); //加互斥锁
 
-    if(access(path.c_str(), F_OK) == 0){
-        throw InternalError("DiskManager::create_file Error: The file already exists"); //文件已存在
-    }
-
-    int openfile=open(path.c_str(),O_RDWR|O_CREAT,0644);
+    int openfile=open(path.c_str(),O_RDWR|O_CREAT|O_EXCL,0644);
 
     if (openfile == -1) {
-        throw InternalError("DiskManager::create_file Error: creat failed"); //文件创建失败
+        if(errno==EEXIST){
+            throw FileExistsError(path); //文件已存在
+        }
+        throw UnixError(); //文件创建失败
+    }
+
+    if (close(openfile) == -1) {
+        throw UnixError();
     }
 }
 
@@ -187,22 +174,22 @@ void DiskManager::destroy_file(const std::string &path) {
 
     if(stat(path.c_str(),&file)==-1){
         if (errno == ENOENT) {
-            throw InternalError("DiskManager::destroy_file Error: file not exist"); //文件不存在
+            throw FileNotFoundError(path); //文件不存在
         }
 
-        throw InternalError("DiskManager::destroy_file Error: function stat failed"); //文件信息获取失败
+        throw UnixError(); //文件信息获取失败
     }
 
     if (!S_ISREG(file.st_mode)) {
-        throw InternalError("DiskManager::destroy_file Error: not regular file"); //非文件报错
+        throw FileNotFoundError(path); //非文件报错
     }
 
     if(path2fd_.find(path)!=path2fd_.end()) {
-        throw InternalError("DiskManager::destroy_file Error: file is opening"); //文件已被打开
+        throw FileNotClosedError(path); //文件已被打开
     }
 
     if (unlink(path.c_str()) == -1) {
-        throw InternalError("DiskManager::destroy_file Error: unlink failed"); //删除失败
+        throw UnixError(); //删除失败
     }
 }
 
@@ -218,19 +205,27 @@ int DiskManager::open_file(const std::string &path) {
     // 注意不能重复打开相同文件，并且需要更新文件打开列表
 
     if (path.empty()) {
-        throw InternalError("DiskManager::destroy_file Error: empty path"); //空路径报错
+        throw InternalError("DiskManager::open_file Error: empty path"); //空路径报错
     }
 
     std::lock_guard<std::mutex> lock(Mutex); //加互斥锁
 
     auto it = path2fd_.find(path);
     if (it != path2fd_.end()) {
-        return it->second; //文件若已打开，返回表中 fd
+        throw FileNotClosedError(path); //文件已打开
     }
 
     int fd = open(path.c_str(),O_RDWR);
     if (fd == -1) {
-        throw InternalError("DiskManager::open_file Error: open failed"); //文件打开失败
+        if (errno == ENOENT) {
+            throw FileNotFoundError(path);
+        }
+        throw UnixError(); //文件打开失败
+    }
+
+    if (fd >= MAX_FD) {
+        close(fd);
+        throw InternalError("DiskManager::open_file Error: fd exceeds MAX_FD");
     }
 
     //更新记忆
@@ -254,13 +249,13 @@ void DiskManager::close_file(int fd) {
     auto it=fd2path_.find(fd);
 
     if(it==fd2path_.end()){
-        throw InternalError("DiskManager::destroy_file Error: The file isn't opening"); //文件未打开
+        throw FileNotOpenError(fd); //文件未打开
     }
 
     std::string path=it->second;
 
     if(close(fd)==-1){
-        throw InternalError("DiskManager::destroy_file Error: Failed to close the file"); //文件关闭失败
+        throw UnixError(); //文件关闭失败
     }
 
     fd2path_.erase(it);
