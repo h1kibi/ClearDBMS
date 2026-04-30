@@ -21,7 +21,19 @@ bool BufferPoolManager::find_victim_page(frame_id_t* frame_id) {
     // 1.1 未满获得frame
     // 1.2 已满使用lru_replacer中的方法选择淘汰页面
 
-    return false;
+    //参数合法检查
+    if (frame_id == nullptr) { return false; }
+
+    //free_list不为空则缓冲池未满，选取头部 id
+    if(!free_list_.empty()){
+        *frame_id = free_list_.front();
+        free_list_.pop_front();
+
+        return true;
+    }
+
+    //缓冲池已满，LRU策略选取淘汰帧
+    return replacer_->victim(frame_id);
 }
 
 /**
@@ -36,6 +48,30 @@ void BufferPoolManager::update_page(Page *page, PageId new_page_id, frame_id_t n
     // 2 更新page table
     // 3 重置page的data，更新page id
 
+    //参数合法检查
+    if(page==nullptr||new_frame_id<0){ return; }
+
+    PageId old_page_id = page->get_page_id();
+
+    //脏页写入磁盘
+    if(page->is_dirty_){
+        auto offset=page->get_data();
+        disk_manager_->write_page(
+            old_page_id.fd,
+            old_page_id.page_no,
+            offset,
+            PAGE_SIZE
+        );
+    }
+
+    //删除脏页映射，更新新页
+    page_table_.erase(old_page_id);
+    page_table_.[new_page_id]=new_frame_id;
+
+    page->reset_memory();
+    page->id_ = new_page_id;
+    page->pin_count_ = 1;
+    page->is_dirty_=false;
 }
 
 /**
@@ -54,7 +90,41 @@ Page* BufferPoolManager::fetch_page(PageId page_id) {
     // 3.     调用disk_manager_的read_page读取目标页到frame
     // 4.     固定目标页，更新pin_count_
     // 5.     返回目标页
-    return nullptr;
+
+    std::scoped_lock lock(latch_);
+
+    auto it = page_table_.find(page_id);
+
+    if(it!=page_table_.end()){ 
+        frame_id_t frame_id = it->second;
+        Page *page = &pages_[frame_id];
+
+        page->pin_count_++;
+        replacer_->pin(frame_id);
+
+        return page;
+    }
+
+    frame_id_t frame_id;
+    if(!find_victim_page(&frame_id)){
+        return nullptr;
+    }
+
+    Page *page = &pages_[frame_id];
+
+    update_page(page,page_id,frame_id);
+
+    disk_manager_->read_page(
+        page_id.fd,
+        page_id.page_no,
+        page->get_data(),
+        PAGE_SIZE
+    );
+
+    page->pin_count_ = 1;
+    page->is_dirty_ = false;
+
+    return page;
 }
 
 /**

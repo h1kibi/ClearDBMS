@@ -29,7 +29,7 @@ bool LRUReplacer::victim(frame_id_t* frame_id) {
     //  选择合适的frame指定为淘汰页面,赋值给*frame_id
 
     //参数合法检查
-    if(frame_id==nullptr){ return false; }
+    if (frame_id == nullptr) { return false; }
 
     if(LRUlist_.empty()){ return false; } // LRUlist_为空则淘汰帧选取失败
 

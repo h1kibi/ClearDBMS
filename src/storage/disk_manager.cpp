@@ -88,6 +88,8 @@ void DiskManager::read_page(int fd, page_id_t page_no, char *offset, int num_byt
  */
 page_id_t DiskManager::allocate_page(int fd) {
     // 简单的自增分配策略，指定文件的页面编号加1
+    std::scoped_lock lock{Mutex};
+
     assert(fd >= 0 && fd < MAX_FD);
     return fd2pageno_[fd]++;
 }
