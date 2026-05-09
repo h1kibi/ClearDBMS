@@ -66,7 +66,7 @@ void BufferPoolManager::update_page(Page *page, PageId new_page_id, frame_id_t n
 
     //删除脏页映射，更新新页
     page_table_.erase(old_page_id);
-    page_table_.[new_page_id]=new_frame_id;
+    page_table_[new_page_id]=new_frame_id;
 
     page->reset_memory();
     page->id_ = new_page_id;
