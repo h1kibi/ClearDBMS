@@ -21,9 +21,6 @@ bool BufferPoolManager::find_victim_page(frame_id_t* frame_id) {
     // 1.1 未满获得frame
     // 1.2 已满使用lru_replacer中的方法选择淘汰页面
 
-    //参数合法检查
-    if (frame_id == nullptr) { return false; }
-
     //free_list不为空则缓冲池未满，选取头部 id
     if(!free_list_.empty()){
         *frame_id = free_list_.front();
@@ -121,8 +118,7 @@ Page* BufferPoolManager::fetch_page(PageId page_id) {
         PAGE_SIZE
     );
 
-    page->pin_count_ = 1;
-    page->is_dirty_ = false;
+    replacer_->pin(frame_id);
 
     return page;
 }
@@ -158,9 +154,7 @@ bool BufferPoolManager::unpin_page(PageId page_id, bool is_dirty) {
     page->pin_count_--;
     if(page->pin_count_==0){ replacer_->unpin(frame_id); }
 
-    if (is_dirty) {
-        page->is_dirty_ = true;
-    }
+    page->is_dirty_ = is_dirty;
 
     return true;
 }
@@ -186,7 +180,7 @@ bool BufferPoolManager::flush_page(PageId page_id) {
     frame_id_t frame_id = it->second;
     Page *page = &pages_[frame_id];
 
-    disk_manager_->write_page(page_id.fd,page_id.page_no,page->get_data(),PAGE_SIZE);
+    disk_manager_->write_page(page_id.fd,page_id.page_no,page->data_,PAGE_SIZE);
 
     page->is_dirty_ = false;
 
@@ -212,18 +206,15 @@ Page* BufferPoolManager::new_page(PageId* page_id) {
     frame_id_t frame_id;
     if(!find_victim_page(&frame_id)){ return nullptr; }
 
-    PageId new_page_id;
-    new_page_id.fd = page_id->fd;
-    new_page_id.page_no = disk_manager_->allocate_page(new_page_id.fd);
-
     Page *page = &pages_[frame_id];
-    update_page(page,new_page_id,frame_id);
+    page_id->page_no = disk_manager_->allocate_page(page_id->fd);
+
+    update_page(page,*page_id,frame_id);
 
     replacer_->pin(frame_id);
     page->pin_count_=1;
     page->is_dirty_ = false;
 
-    *page_id = new_page_id;
     return page;
 }
 
